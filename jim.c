@@ -1289,8 +1289,7 @@ static int JimParseScript(struct JimParserCtx *pc)
                 return JIM_OK;
             case '#':
                 if (pc->comment) {
-                    JimParseComment(pc);
-                    continue;
+                    return JimParseComment(pc);
                 }
                 return JimParseStr(pc);
             default:
@@ -1769,6 +1768,8 @@ static int JimParseStr(struct JimParserCtx *pc)
 
 static int JimParseComment(struct JimParserCtx *pc)
 {
+    pc->tstart = pc->p + 1;
+    pc->tline = pc->linenr;
     while (*pc->p) {
         if (*pc->p == '\\') {
             pc->p++;
@@ -1782,14 +1783,13 @@ static int JimParseComment(struct JimParserCtx *pc)
             }
         }
         else if (*pc->p == '\n') {
-            pc->p++;
-            pc->len--;
-            pc->linenr++;
             break;
         }
         pc->p++;
         pc->len--;
     }
+    pc->tend = pc->p - 1;
+    pc->tt = JIM_TT_NONE;
     return JIM_OK;
 }
 
