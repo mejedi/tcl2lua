@@ -493,12 +493,12 @@ function cmdfunc.set(result, cmd)
     if name == 'testdir' then
         return ignorecmd(result, cmd)
     end 
-    if #cmd <= 3 then
-        local var = checkvar(name)
+    local var = checkvar(name)
+    if #cmd <= 3 and var then
         local val = cmd[3] or nil_ref
         if node_type(cmd) == 'rcmd' or not var then
             insert(result, format('set('))
-            insert_expr(result, name)
+            insert_expr(result, var)
             insert(result, ', ')
             insert_expr(result, val)
             insert(result, ')')
@@ -507,6 +507,15 @@ function cmdfunc.set(result, cmd)
             insert_expr(result, val)
         end
         return true
+    end
+end
+
+function cmdfunc.expr(result, cmd)
+    if #cmd == 2 and (type(cmd[2]) == 'string') then
+        xbump('!expr-2')
+    end
+    if #cmd == 2 and node_type(cmd[2]) == 'subst' then
+        xbump('!expr-2-s')
     end
 end
 

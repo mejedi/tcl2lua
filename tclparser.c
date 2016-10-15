@@ -114,6 +114,7 @@ struct Jim_Interp *interp_get(lua_State *L)
         lua_pop(L, 1);
         return interp;
     }
+    lua_pop(L, 1);
     p = lua_newuserdata(L, sizeof interp);
     luaL_getmetatable(L, interp_typename);
     lua_setmetatable(L, -2);
