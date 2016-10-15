@@ -75,26 +75,25 @@ function tokfunc.WORD(line, tokens, tokpos)
     return node_type(n > 0 and 'subst' or 'subst*', copy), tokpos
 end
 
+local function do_subst(...)
+    local ok, tokens = tclparser.parsesubst(...)
+    if ok then
+        local ast = node_type('subst', tcl_ast(nil, tokens, nil, #tokens))
+        -- get rid of redundant subst-s
+        if #ast == 1 and type(ast[1]) == 'string' then
+            return ast[1]
+        end
+        return ast
+    end
+end
+
 function tokfunc.CMD(line, tokens, tokpos)
     local ast = tcl_parse(tokens[tokpos+1], line)
     if #ast == 1 then
         local cmd = ast[1]
-        if cmd[1] == 'subst' and #cmd >= 2 then
+        if cmd[1] == 'subst' then
             -- handle subst here - emit the same AST as created by WORD
-            local allstrings = true
-            for _, arg in ipairs(cmd) do
-                allstrings = allstrings and type(arg) == 'string'
-            end
-            if allstrings then
-                local ok, tokens = tclparser.parsesubst(select(2, unpack(cmd)))
-                if ok then
-                    ast = node_type('subst', tcl_ast(line, tokens, nil, #tokens))
-                    -- get rid of redundant subst-s
-                    if #ast == 1 and type(ast[1]) == 'string' then
-                        ast = ast[1]
-                    end
-                end
-            end
+            ast = do_subst(select(2, unpack(cmd))) or ast
         end
     end
     return ast, tokpos + 2
@@ -102,6 +101,10 @@ end
 
 function tokfunc.DICTSUGAR(line, tokens, tokpos)
     return node_line(line, node_type('dsugar', {tokens[tokpos+1]})), tokpos + 2
+end
+
+function tokfunc.EXPRSUGAR(line, tokens, tokpos)
+    return node_line(line, node_type('esugar', {tokens[tokpos+1]})), tokpos + 2
 end
 
 -- construct ast starting from the given pos in the token stream
@@ -114,7 +117,7 @@ tcl_ast = function(line, tokens, tokpos, limit)
         local ttype, item = tokens[tokpos]
         local handler = tokfunc[ttype]
         if not handler then
-            error(format('%s:%d: unhandled token [%q %q]',
+            error(format('%s:%s: unhandled token [%q %q]',
                          file, line, ttype, tokens[tokpos+1]),
                   0)
         end
@@ -128,7 +131,9 @@ end
 -- parse script and construct ast
 tcl_parse = function(src, firstline)
     local ok, res = tclparser.parse(src)
-    if not ok then error(res) end
+    if not ok then return
+        node_type('unparsed', node_line(firstline or 1, {src}))
+    end
     if firstline then
         for i, tok in ipairs(res) do
             if tok == 'LINE' then
@@ -221,7 +226,7 @@ tolua = function(result, ast)
         end
         xbump('[total cmds]')
     else
-        insert(xresult, 'X!token', ast)
+        insert_x(result, 'X!token!'..nt, ast)
     end
 end
 
@@ -374,7 +379,6 @@ cmdfunc['return'] = function(result, cmd)
 end
 
 local function ifhlp(result, cmd)
-    
     local i = cmd[3] == 'then' and 4 or 3
     while cmd[i] do
         indent(result)
@@ -392,7 +396,6 @@ local function ifhlp(result, cmd)
             break
         end
     end
-
     insert_indent(result, 'end')
     return true
 end
@@ -417,43 +420,34 @@ cmdfunc['while'] = function(result, cmd)
     end
 end
 
-local function switchhlp(result, key, branches, start)
-    start = start or 1
-    local ast = {}
-    if pcall(function()
-        for i = start,#branches,2 do
-            ast[i] = tcl_parse(branches[i+1])
-        end
-    end) then
-        for i = start,#branches,2 do
-            if i == start then
-                insert(result, 'if ')
-            else
-                insert_indent(result, 'elseif ')
-            end
-            insert_x(result, 'X!case', {key, branches[i]})
-            insert(result, ' then\n')
-            indent(result)
-            tolua(result, ast[i])
-            dedent(result)
-        end
-        insert_indent(result, 'end')
-        return true
-    end
-end
-
 cmdfunc['switch'] = function(result, cmd)
-    if #cmd == 3 and type(cmd[3]) == 'string' then
-        local _, branches = tclparser.parselist(cmd[3])
-        return switchhlp(result, cmd[2], branches)
+    local i, n = 2, #cmd
+    local branches, start
+    -- skip options which we ignore for now
+    while type(cmd[i]) == 'string' and match(cmd[i], '^-') do
+        i = i + 1
     end
-    -- '--' is options separator in Tcl's switch, recognized
-    -- options include -regex, -glob, -exact, etc.
-    if #cmd == 4 and cmd[2] == '--' and type(cmd[4]) == 'string' then
-        local _, branches = tclparser.parselist(cmd[4])
-        return switchhlp(result, cmd[3], branches)
+    -- maybe { case1 {...} ,,, caseN {...} }?
+    if i == n-1 and type(cmd[n]) == 'string' then
+        branches = select(2,tclparser.parselist(cmd[n]))
+        start = 1
+    else
+        branches, start = cmd, i + 1
     end
-    return switchhlp(result, cmd[2], cmd, 3)
+    for j = start,#branches,2 do
+        if j == start then
+            insert(result, 'if ')
+        else
+            insert_indent(result, 'elseif ')
+        end
+        insert_x(result, 'X!case', {cmd[i], branches[j]})
+        insert(result, ' then\n')
+        indent(result)
+        tolua(result, tcl_parse(branches[j+1]))
+        dedent(result)
+    end
+    insert_indent(result, 'end')
+    return true
 end
 
 cmdfunc['break'] = function(result, cmd)
@@ -648,12 +642,14 @@ local function execsql(result, cmd)
     local n = #cmd
     if n == 2 or n == 3 then
         local sql = cmd[2]
-        if type(sql) == 'string' and n == 2  then
-            insert(result, cmd[1]..' ')
-            insert_sql(result, sql)
+        sql = do_subst('-nocommands', sql) or sql
+        local pos = #result
+        result[pos+1] = cmd[1]
+        result[pos+2] = '('
+        insert_sql(result, sql)
+        if n == 2 and #result == pos + 3 then
+            result[pos+2] = ' ' -- assume paren was unnecessary
         else
-            insert(result, cmd[1]..'(')
-            insert_sql(result, sql)
             if n == 3 then
                 insert(result, ", "); insert_expr(result, cmd[3])
             end
