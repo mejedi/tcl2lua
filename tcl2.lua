@@ -1,10 +1,9 @@
 local max, min = math.max, math.min
 local format, match, sub, gsub = string.format, string.match, string.sub, string.gsub
-local find, rep, gmatch = string.find, string.rep, string.gmatch
-local insert, concat = table.insert, table.concat
+local find, rep, gmatch, lower = string.find, string.rep, string.gmatch, string.lower
+local insert, remove, concat = table.insert, table.remove, table.concat
 local tclparser = require('tclparser')
 local json = require('json')
-local yaml = require('yaml')
 
 local file = ... and ... or 'select3.test'
 local source = io.open(file):read('*a')
@@ -504,14 +503,161 @@ function cmdfunc.set(result, cmd)
     end
 end
 
-function cmdfunc.expr(result, cmd)
-    if #cmd == 2 and (type(cmd[2]) == 'string') then
-        xbump('!expr-2')
+-----------------------------------------------------------------------
+
+local exprtok
+do
+    local function literal(def, ttype, tval, stack)
+        insert(stack, tval)    
     end
-    if #cmd == 2 and node_type(cmd[2]) == 'subst' then
-        xbump('!expr-2-s')
+
+    local function literalbool(def, ttype, tval, stack)
+        insert(stack, tval == 1 or tval == 'on' or tval == 'true' or false)
+    end
+
+    local function unop(def, ttype, tval, stack)
+        insert(stack, {def.op, remove(stack) })
+    end
+
+    local function binop(def, ttype, tval, stack)
+        local rhs = remove(stack)
+        local lhs = remove(stack)
+        insert(stack, {def.op, lhs, rhs})
+    end
+
+    local function ternop(def, ttype, tval, stack)
+        local c = remove(stack)
+        local b = remove(stack)
+        local a = remove(stack)
+        insert(stack, {def.op, a, b, c})
+    end
+
+    local function ignore() end
+    local function consume1(def, ttype, tval, stack) remove(stack) end
+
+    exprtok = {
+        ESCX    = { fn = literal },
+        STR     = { fn = literal },
+        INT     = { fn = literal },
+        DOUBLE  = { fn = literal },
+        BOOLEAN = { fn = literalbool },
+        MUL     = { op = '*',  fn = binop },
+        DIV     = { op = '/',  fn = binop },
+        MOD     = { op = '%',  fn = binop },
+        SUB     = { op = '-',  fn = binop },
+        ADD     = { op = '+',  fn = binop },
+        LSHIFT  = { op = '<<', fn = binop },
+        RSHIFT  = { op = '>>', fn = binop },
+        ROTL    = { op = '<<<', fn = binop },
+        ROTR    = { op = '>>>', fn = binop },
+        LT      = { op = '<',  fn = binop },
+        GT      = { op = '>',  fn = binop },
+        LTE     = { op = '<=', fn = binop },
+        GTE     = { op = '>=', fn = binop },
+        EQ      = { op = '==', fn = binop },
+        NE      = { op = '!=', fn = binop },
+        BITAND  = { op = '&',  fn = binop },
+        BITXOR  = { op = '^',  fn = binop },
+        BITOR   = { op = '|',  fn = binop },
+        -- AND
+        AND_LEFT      = { fn = consume1 },
+        AND_RIGHT     = { op = '&&', fn = binop },
+        -- OR
+        OR_LEFT       = { fn = consume1 },
+        OR_RIGHT      = { op = '||', fn = binop },
+        -- TERNARY
+        TERNARY_LEFT  = { fn = consume1 },
+        TERNARY_RIGHT = { fn = consume1 },
+        -- COLON
+        COLON_LEFT    = { fn = ignore },
+        COLON_RIGHT   = { op = '?:', fn = ternop },
+        POW           = { op = '**', fn = binop },
+        EQ            = { op = 'eq', fn = binop },
+        NE            = { op = 'ne', fn = binop },
+        IN            = { op = 'ni', fn = binop },
+        NI            = { op = 'ni', fn = binop },
+        NOT           = { op = '!',  fn = unop },
+        BITNOT        = { op = '~',  fn = unop },
+        UNARYMINUS    = { op = '-',  fn = unop },
+        UNARYPLUS     = { op = '+',  fn = unop }
+    }
+end
+
+local function tcl_expr_ast(tokens)
+    local stack = {}
+    for i = 1,#tokens,2 do
+        local tok = tokens[i]
+        local def = exprtok[tok]
+        if not def then
+            if match(tok, '^FN') then
+                insert(stack, { lower(sub(tok, 3)), remove(stack) })
+            else
+                return nil, tok
+            end
+        else
+            def.fn(def, tok, tokens[i+1], stack)
+        end
+    end
+    return remove(stack)
+end
+
+function cmdfunc.expr(result, cmd)
+    local merged = {}
+    for i = 2,#cmd do
+        local node = do_subst('-nocommands', cmd[i]) or cmd[i]
+        if node_type(node) == 'subst' then
+            for _, child in ipairs(node) do insert(merged, child) end
+        else
+            insert(merged, node)
+        end
+        insert(merged, ' ')
+    end
+    local template, params = translate_subst(merged)
+    local paramids = {}
+    for i=1,#params do paramids[i] = 0 end
+    local e0 = format(template, unpack(paramids))
+    local ok, tokens = tclparser.parseexpr(e0)
+    if not ok then return end
+    -- collect all ints in expression
+    local ints = {}
+    for i = 1,#tokens,2 do
+        if tokens[i] == 'INT' then ints[tokens[i+1]] = true end
+    end
+    -- assign unique integer literal for each param for later matching
+    local param_by_id = {}
+    for i,param in ipairs(params) do
+        local id = 1000
+        while ints[id] do id = id + 1 end
+        paramids[i] = id
+        ints[id] = true
+        param_by_id[id] = param
+    end
+    local e1 = format(template, unpack(paramids))
+    local ok, tokens = tclparser.parseexpr(e1)
+    assert(ok)
+    for i = 1,#tokens,2 do
+        -- replace placeholders with respective params; expand CMD
+        local ttype, tval = tokens[i], tokens[i+1]
+        if ttype == 'INT' then
+            local param = param_by_id[tval]
+            if param then
+                tokens[i], tokens[i+1] = 'ESCX', param
+                param_by_id[tval] = nil
+            end
+        elseif ttype == 'CMD' then
+            --
+        end
+    end
+    -- every param consumed?
+    if next(param_by_id) then return end
+    local ast = tcl_expr_ast(tokens)
+    if ast then
+        insert_x(result, "X!expr", ast)
+        return true
     end
 end
+
+-----------------------------------------------------------------------
 
 function cmdfunc.string(result, cmd)
     local subcmd = cmd[2]
@@ -540,9 +686,9 @@ local function insert_list(result, list, start)
 end
 
 function cmdfunc.list(result, cmd)
-    insert(result, '{')
+    insert(result, '{ ')
     insert_list(result, cmd, 2)
-    insert(result, '}')
+    insert(result, ' }')
     return true
 end
 
@@ -683,6 +829,9 @@ cmdfunc.dbat = db
 
 cmdfunc.sqlite3 = usercmd
 cmdfuzz['^sqlite3_'] = usercmd
+
+cmdfunc.forcedelete = usercmd
+cmdfunc.reset_db = usercmd
 
 -----------------------------------------------------------------------
 
