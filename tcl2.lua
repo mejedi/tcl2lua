@@ -857,22 +857,63 @@ local function insert_result(result, ast, label)
     insert_indent(result, '}')
 end
 
+-- match this frequent pattern:
+-- set v [catch {...} msg]
+-- lappend v $msg
+local function match_catch(cmd, prevcmd)
+    if node_type(cmd) ~= 'cmd' or cmd[1] ~= 'lappend' or
+       type(cmd[2]) ~= 'string' or node_type(cmd[3]) ~= 'var' or
+       #cmd ~= 3 then
+            return
+    end
+    if node_type(prevcmd) ~= 'cmd' or prevcmd[1] ~= 'set' or
+       prevcmd[2] ~= cmd[2] or node_type(prevcmd[3]) ~= 'cmds' or
+       #prevcmd[3] ~= 1 or #prevcmd ~= 3 then
+            return
+    end
+    local catch = prevcmd[3][1]
+    if node_type(catch) ~= 'cmd' or catch[1] ~= 'catch' or
+       type(catch[2]) ~= 'string' or catch[3] ~= cmd[3][1] or
+       #catch ~= 3 then
+            return
+    end
+    local nested = tcl_parse(catch[2], node_line(catch))
+    if node_type(nested) ~= 'cmds' or #nested ~= 1 or
+       node_type(nested[1]) ~= 'cmd' then
+            return
+    end
+    return nested[1]
+end
+
 function cmdfunc.do_test(result, cmd)
     if #cmd ~= 4 or type(cmd[3]) ~= 'string' then return false end
     
     local nested = tcl_parse(cmd[3], node_line(cmd))
+    for i = #nested,1,-1 do
+        local cmd = nested[i]
+        if node_type(cmd) == 'cmd' then
+            local protected = match_catch(cmd, nested[i-1])
+            if protected and match(protected[1], '^execsql') then
+                protected[1] = gsub(protected[1], '^exec', 'catch')
+                cmd = protected
+                nested[i] = nil
+                nested[i-1] = cmd
+            end
+            node_type('rcmd', cmd); break
+        end
+    end
     if #nested == 1 then
         local nested = nested[1]
-        if #nested == 2 and nested[1] == 'execsql' then
-            -- emit a shorter form
-            insert(result, 'do_execsql_test(')
-            insert_expr(result, cmd[2])
-            insert(result, ', ')
-            insert_sql(result, nested[2], 'force_multi')
-            insert(result, ', ')
-            insert_result(result, cmd[4], cmd[2])
-            insert(result, ')\n')
-            return true
+        if #nested == 2 and match(nested[1], 'sql') then
+                -- emit a shorter form
+                insert(result, format('do_%s_test(', nested[1]))
+                insert_expr(result, cmd[2])
+                insert(result, ', ')
+                insert_sql(result, nested[2], 'force_multi')
+                insert(result, ', ')
+                insert_result(result, cmd[4], cmd[2])
+                insert(result, ')\n')
+                return true
         end
     end
     
@@ -881,12 +922,6 @@ function cmdfunc.do_test(result, cmd)
     insert(result, ', function()\n')
 
     indent(result)
-    for i = #nested,1,-1 do
-        local cmd = nested[i]
-        if node_type(cmd) == 'cmd' then
-            node_type('rcmd', cmd); break
-        end
-    end
     tolua(result, nested)
 
     dedent(result)
