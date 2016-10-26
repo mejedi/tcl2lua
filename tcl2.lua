@@ -367,7 +367,6 @@ local function ignorecmd(result, cmd)
 end
 cmdfunc.unset = ignorecmd
 cmdfunc.source = ignorecmd
-cmdfunc.finish_test = ignorecmd
 
 cmdfunc['return'] = function(result, cmd)
     if #cmd <= 2 then
@@ -832,6 +831,7 @@ cmdfuzz['^sqlite3_'] = usercmd
 
 cmdfunc.forcedelete = usercmd
 cmdfunc.reset_db = usercmd
+cmdfunc.finish_test = usercmd
 
 -----------------------------------------------------------------------
 
