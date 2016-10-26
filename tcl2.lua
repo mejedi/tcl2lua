@@ -234,7 +234,7 @@ end
 local function insert_literal(result, _1, _2)
     local ast = _2 or _1
     if type(ast) == 'string' then
-        insert(result, tonumber(ast) or
+        insert(result, tonumber(ast) and ast or
                        (match(ast, '[\n"\\]') and safestr(ast)) or
                        format('%q', ast))
     else
@@ -835,9 +835,12 @@ cmdfunc.reset_db = usercmd
 
 -----------------------------------------------------------------------
 
-local function insert_result(result, ast)
+local function insert_result(result, ast, label)
     insert(result, '{\n');
-    indent(result); insert_indent(result); dedent(result)
+    indent(result); insert_indent(result)
+    if type(label)=='string' then
+        insert(result, format('-- <%s>\n', label)); insert_indent(result)
+    end
     if type(ast) == 'string' then
         local _, list = tclparser.parselist(ast)
         insert_list(result, list)
@@ -846,7 +849,12 @@ local function insert_result(result, ast)
     else
         insert_expr(result, ast)
     end
-    insert(result, '\n'); insert_indent(result, '}')
+    insert(result, '\n');
+    if type(label)=='string' then
+        insert_indent(result, format('-- </%s>\n', label))
+    end
+    dedent(result)
+    insert_indent(result, '}')
 end
 
 function cmdfunc.do_test(result, cmd)
@@ -862,7 +870,7 @@ function cmdfunc.do_test(result, cmd)
             insert(result, ', ')
             insert_sql(result, nested[2], 'force_multi')
             insert(result, ', ')
-            insert_result(result, cmd[4])
+            insert_result(result, cmd[4], cmd[2])
             insert(result, ')\n')
             return true
         end
@@ -884,7 +892,7 @@ function cmdfunc.do_test(result, cmd)
     dedent(result)
 
     insert_indent(result, 'end, ')
-    insert_result(result, cmd[4])
+    insert_result(result, cmd[4], cmd[2])
     insert(result, ')\n')
     return true
 end
@@ -897,7 +905,7 @@ function cmdfunc.do_execsql_test(result, cmd)
         insert_sql(result, cmd[3], 'force_multi')
         if cmd[4] then
             insert(result, ', ')
-            insert_result(result, cmd[4])
+            insert_result(result, cmd[4], cmd[2])
         end
         insert(result, ')\n')
         return true
@@ -911,7 +919,7 @@ function cmdfunc.do_catchsql_test(result, cmd)
         insert(result, ', ')
         insert_sql(result, cmd[3])
         insert(result, ', ')
-        insert_result(result, cmd[4])
+        insert_result(result, cmd[4], cmd[2])
         insert(result, ')\n')
         return true
     end
